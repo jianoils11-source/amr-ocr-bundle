@@ -1,0 +1,163 @@
+# Public OCR dependencies only: no application checkout or customer data.
+name: Amr OCR asset bundle
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/amr-ocr-bundle.yml'
+permissions:
+  contents: read
+concurrency:
+  group: amr-ocr-assets
+  cancel-in-progress: false
+jobs:
+  bundle:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Fetch pinned packages and validate assets
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from __future__ import annotations
+          import base64, gzip, hashlib, io, json, ssl, subprocess, tarfile, time, zipfile
+          from pathlib import Path
+          from urllib.parse import quote, urlsplit
+          from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
+          ROOT = Path('ocr-build')
+          VENDOR = ROOT / 'nada-group-php/assets/vendor/ocr'
+          PACKAGES = [('tesseract.js','6.0.1'),('tesseract.js-core','6.0.0'),('@tesseract.js-data/ara','1.0.0'),('@tesseract.js-data/eng','1.0.0')]
+          REPORT = []
+          MAX_BYTES = 80 * 1024 * 1024
+          def permitted(url):
+              p = urlsplit(url)
+              return p.scheme == 'https' and p.hostname == 'registry.npmjs.org' and not p.username and not p.password and p.port in (None,443)
+          class RegistryRedirects(HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  if not permitted(newurl):
+                      raise ValueError('Download redirect outside public npm registry')
+                  return super().redirect_request(req,fp,code,msg,headers,newurl)
+          def download(url,maximum=MAX_BYTES):
+              if not permitted(url):
+                  raise ValueError('Unexpected download host')
+              opener = build_opener(HTTPSHandler(context=ssl.create_default_context()),RegistryRedirects())
+              for attempt in range(3):
+                  try:
+                      req = Request(url,headers={'User-Agent':'Amr-Mourad-OCR-Assets-Builder/1.0'})
+                      with opener.open(req,timeout=90) as response:
+                          data = response.read(maximum+1)
+                      if not data or len(data)>maximum:
+                          raise ValueError('Empty or oversized download')
+                      return data
+                  except (OSError,ValueError) as error:
+                      if attempt == 2:
+                          raise RuntimeError(f'Download failed: {url}: {error}') from error
+                      time.sleep(2**attempt)
+          def member_bytes(tar,name):
+              info = tar.getmember('package/'+name)
+              if not info.isfile() or not 0 < info.size <= MAX_BYTES:
+                  raise ValueError('Invalid package member: '+name)
+              stream = tar.extractfile(info)
+              if stream is None:
+                  raise ValueError('Missing regular file: '+name)
+              data = stream.read(MAX_BYTES+1)
+              if len(data)!=info.size:
+                  raise ValueError('Incomplete member: '+name)
+              return data
+          def write(relative,data):
+              target = VENDOR / relative
+              target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_bytes(data)
+          def fetch_package(name,version):
+              url = 'https://registry.npmjs.org/'+quote(name,safe='')+'/'+version
+              metadata = json.loads(download(url,4*1024*1024))
+              if metadata.get('name')!=name or metadata.get('version')!=version:
+                  raise ValueError('Unexpected package identity')
+              dist = metadata['dist']
+              integrity = dist.get('integrity','')
+              matches = [s[7:] for s in integrity.split() if s.startswith('sha512-')]
+              if not matches:
+                  raise ValueError('SHA-512 package integrity required')
+              archive = download(dist['tarball'])
+              if base64.b64encode(hashlib.sha512(archive).digest()).decode('ascii') not in matches:
+                  raise ValueError('Package integrity mismatch: '+name)
+              with tarfile.open(fileobj=io.BytesIO(archive),mode='r:gz') as tar:
+                  package = json.loads(member_bytes(tar,'package.json'))
+                  if package.get('name')!=name or package.get('version')!=version:
+                      raise ValueError('Archive identity mismatch')
+                  if package.get('license')!='Apache-2.0':
+                      raise ValueError('License review required: '+name)
+                  legal_dir = 'licenses/'+name.replace('@','').replace('/','-')
+                  legal_found = False
+                  for member in tar.getmembers():
+                      parts = member.name.split('/')
+                      if len(parts)==2 and parts[0]=='package' and member.isfile():
+                          leaf = parts[1]
+                          if leaf.upper().startswith(('LICENSE','COPYING','NOTICE')):
+                              write(legal_dir+'/'+leaf,member_bytes(tar,leaf))
+                              legal_found = True
+                  if not legal_found and name in ('tesseract.js','tesseract.js-core'):
+                      raise ValueError('Missing engine license')
+                  write(legal_dir+'/package-metadata.json',json.dumps({'name':name,'version':version,'license':package['license'],'repository':package.get('repository'),'registry_metadata_url':url,'tarball_url':dist['tarball'],'integrity':integrity},ensure_ascii=False,indent=2).encode('utf-8'))
+                  if name=='tesseract.js':
+                      for asset in ('tesseract.min.js','worker.min.js'):
+                          write(asset,member_bytes(tar,'dist/'+asset))
+                          license_name = 'dist/'+asset+'.LICENSE.txt'
+                          if any(x.name=='package/'+license_name for x in tar.getmembers()):
+                              write(asset+'.LICENSE.txt',member_bytes(tar,license_name))
+                  elif name=='tesseract.js-core':
+                      for stem in ('tesseract-core','tesseract-core-simd','tesseract-core-lstm','tesseract-core-simd-lstm'):
+                          for suffix in ('.wasm.js','.wasm'):
+                              data = member_bytes(tar,stem+suffix)
+                              if suffix=='.wasm' and data[:8]!=b'\x00asm\x01\x00\x00\x00':
+                                  raise ValueError('Invalid WebAssembly header')
+                              write('core/'+stem+suffix,data)
+                  else:
+                      lang = name.rsplit('/',1)[1]
+                      data = member_bytes(tar,'4.0.0_best_int/'+lang+'.traineddata.gz')
+                      if data[:2]!=b'\x1f\x8b':
+                          raise ValueError('Invalid language gzip')
+                      with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+                          decoded = gz.read(MAX_BYTES+1)
+                      if not 100000<len(decoded)<=MAX_BYTES:
+                          raise ValueError('Unexpected language size')
+                      write('lang/'+lang+'.traineddata.gz',data)
+              REPORT.append({'name':name,'version':version,'source':url,'tarball_url':dist['tarball'],'integrity':integrity,'tarball_sha256':hashlib.sha256(archive).hexdigest(),'downloaded_bytes':len(archive)})
+              print('Verified package:',name,version,flush=True)
+          def build():
+              if ROOT.exists():
+                  raise RuntimeError('Clean directory required')
+              VENDOR.mkdir(parents=True)
+              for name,version in PACKAGES:
+                  fetch_package(name,version)
+              for js in VENDOR.rglob('*.js'):
+                  subprocess.run(['node','--check',str(js)],check=True)
+              subprocess.run(['node','-e',"const fs=require('fs'),p=require('path');const d=process.argv[1];for(const f of fs.readdirSync(d).filter(x=>x.endsWith('.wasm'))){if(!WebAssembly.validate(fs.readFileSync(p.join(d,f))))throw Error('Invalid WASM: '+f);console.log('Valid WASM:',f);}",str(VENDOR/'core')],check=True)
+              write('.htaccess',b'<IfModule mod_mime.c>\nAddType application/wasm .wasm\nAddType application/javascript .js\nAddType application/gzip .gz\n</IfModule>\n')
+              write('README.txt',b'Pinned public OCR assets. Tesseract.js 6.0.1/core 6.0.0; Arabic and English best_int.\nLicenses and origins are recorded under licenses/.\nIntegrity and WASM validation are NOT OCR accuracy tests.\n')
+              write('ready.json',json.dumps({'version':'6.0.1','core_version':'6.0.0','languages':['ara','eng'],'data_variant':'4.0.0_best_int'}).encode('ascii'))
+              hashes = {str(p.relative_to(VENDOR)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(VENDOR.rglob('*')) if p.is_file()}
+              write('asset-hashes.json',json.dumps(hashes,indent=2).encode('ascii'))
+              out = Path('artifacts')
+              out.mkdir()
+              report = {'packages':REPORT,'js_syntax_checked':True,'wasm_modules_validated':4,'gzip_languages_validated':2,'real_ocr_executed':False,'application_integration_tested':False,'application_or_customer_data_read':False}
+              (out/'build-report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+              zipped = out/'Amr-Mourad-OCR-Assets.zip'
+              with zipfile.ZipFile(zipped,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
+                  for p in sorted(ROOT.rglob('*')):
+                      if p.is_file():
+                          z.write(p,str(p.relative_to(ROOT)))
+                  z.write(out/'build-report.json','OCR-ASSET-BUILD-REPORT.json')
+              (out/'SHA256SUMS.txt').write_text(hashlib.sha256(zipped.read_bytes()).hexdigest()+'  '+zipped.name+'\n',encoding='ascii')
+              print('Asset bundle created:',zipped,zipped.stat().st_size,'bytes')
+          build()
+          PY
+      - name: Publish dependency bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: amr-ocr-assets-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
