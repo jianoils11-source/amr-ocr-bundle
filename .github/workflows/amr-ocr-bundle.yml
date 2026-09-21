@@ -28,24 +28,25 @@ jobs:
           ROOT = Path('ocr-build')
           VENDOR = ROOT / 'nada-group-php/assets/vendor/ocr'
           PACKAGES = [('tesseract.js','6.0.1'),('tesseract.js-core','6.0.0'),('@tesseract.js-data/ara','1.0.0'),('@tesseract.js-data/eng','1.0.0')]
+          LICENSE_URL = 'https://raw.githubusercontent.com/naptha/tessdata/gh-pages/LICENSE'
+          LICENSE_BLOB = '261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64'
           REPORT = []
           MAX_BYTES = 80 * 1024 * 1024
           def permitted(url):
               p = urlsplit(url)
-              return p.scheme == 'https' and p.hostname == 'registry.npmjs.org' and not p.username and not p.password and p.port in (None,443)
-          class RegistryRedirects(HTTPRedirectHandler):
+              return p.scheme == 'https' and (p.hostname == 'registry.npmjs.org' or url == LICENSE_URL) and not p.username and not p.password and p.port in (None,443)
+          class SafeRedirects(HTTPRedirectHandler):
               def redirect_request(self,req,fp,code,msg,headers,newurl):
                   if not permitted(newurl):
-                      raise ValueError('Download redirect outside public npm registry')
+                      raise ValueError('Unexpected download redirect')
                   return super().redirect_request(req,fp,code,msg,headers,newurl)
           def download(url,maximum=MAX_BYTES):
               if not permitted(url):
-                  raise ValueError('Unexpected download host')
-              opener = build_opener(HTTPSHandler(context=ssl.create_default_context()),RegistryRedirects())
+                  raise ValueError('Unexpected download URL')
+              opener = build_opener(HTTPSHandler(context=ssl.create_default_context()),SafeRedirects())
               for attempt in range(3):
                   try:
-                      req = Request(url,headers={'User-Agent':'Amr-Mourad-OCR-Assets-Builder/1.0'})
-                      with opener.open(req,timeout=90) as response:
+                      with opener.open(Request(url,headers={'User-Agent':'Amr-Mourad-OCR-Assets-Builder/1.1'}),timeout=90) as response:
                           data = response.read(maximum+1)
                       if not data or len(data)>maximum:
                           raise ValueError('Empty or oversized download')
@@ -86,8 +87,9 @@ jobs:
                   package = json.loads(member_bytes(tar,'package.json'))
                   if package.get('name')!=name or package.get('version')!=version:
                       raise ValueError('Archive identity mismatch')
-                  if package.get('license')!='Apache-2.0':
-                      raise ValueError('License review required: '+name)
+                  expected_license = 'MIT' if name.startswith('@tesseract.js-data/') else 'Apache-2.0'
+                  if package.get('license')!=expected_license:
+                      raise ValueError('License review required: '+name+' '+str(package.get('license')))
                   legal_dir = 'licenses/'+name.replace('@','').replace('/','-')
                   legal_found = False
                   for member in tar.getmembers():
@@ -99,6 +101,8 @@ jobs:
                               legal_found = True
                   if not legal_found and name in ('tesseract.js','tesseract.js-core'):
                       raise ValueError('Missing engine license')
+                  # Preserve actual metadata: npm data wrappers declare MIT; upstream traineddata is Apache-2.0.
+                  write(legal_dir+'/package.json',member_bytes(tar,'package.json'))
                   write(legal_dir+'/package-metadata.json',json.dumps({'name':name,'version':version,'license':package['license'],'repository':package.get('repository'),'registry_metadata_url':url,'tarball_url':dist['tarball'],'integrity':integrity},ensure_ascii=False,indent=2).encode('utf-8'))
                   if name=='tesseract.js':
                       for asset in ('tesseract.min.js','worker.min.js'):
@@ -123,7 +127,7 @@ jobs:
                       if not 100000<len(decoded)<=MAX_BYTES:
                           raise ValueError('Unexpected language size')
                       write('lang/'+lang+'.traineddata.gz',data)
-              REPORT.append({'name':name,'version':version,'source':url,'tarball_url':dist['tarball'],'integrity':integrity,'tarball_sha256':hashlib.sha256(archive).hexdigest(),'downloaded_bytes':len(archive)})
+              REPORT.append({'name':name,'version':version,'package_license':package['license'],'source':url,'tarball_url':dist['tarball'],'integrity':integrity,'tarball_sha256':hashlib.sha256(archive).hexdigest(),'downloaded_bytes':len(archive)})
               print('Verified package:',name,version,flush=True)
           def build():
               if ROOT.exists():
@@ -131,6 +135,11 @@ jobs:
               VENDOR.mkdir(parents=True)
               for name,version in PACKAGES:
                   fetch_package(name,version)
+              legal = download(LICENSE_URL,100000)
+              if hashlib.sha1(b'blob '+str(len(legal)).encode()+b'\0'+legal).hexdigest()!=LICENSE_BLOB:
+                  raise ValueError('Upstream traineddata license changed; review required')
+              write('licenses/tessdata/LICENSE',legal)
+              write('licenses/tessdata/ORIGIN.txt',('Arabic/English traineddata: https://github.com/naptha/tessdata/tree/gh-pages/4.0.0_best_int\nUpstream license: '+LICENSE_URL+'\nGit blob: '+LICENSE_BLOB+'\nNPM wrappers declare MIT; their metadata is preserved separately. No wrapper index.js is distributed.\n').encode())
               for js in VENDOR.rglob('*.js'):
                   subprocess.run(['node','--check',str(js)],check=True)
               subprocess.run(['node','-e',"const fs=require('fs'),p=require('path');const d=process.argv[1];for(const f of fs.readdirSync(d).filter(x=>x.endsWith('.wasm'))){if(!WebAssembly.validate(fs.readFileSync(p.join(d,f))))throw Error('Invalid WASM: '+f);console.log('Valid WASM:',f);}",str(VENDOR/'core')],check=True)
@@ -141,7 +150,7 @@ jobs:
               write('asset-hashes.json',json.dumps(hashes,indent=2).encode('ascii'))
               out = Path('artifacts')
               out.mkdir()
-              report = {'packages':REPORT,'js_syntax_checked':True,'wasm_modules_validated':4,'gzip_languages_validated':2,'real_ocr_executed':False,'application_integration_tested':False,'application_or_customer_data_read':False}
+              report = {'packages':REPORT,'js_syntax_checked':True,'wasm_modules_validated':4,'gzip_languages_validated':2,'real_ocr_executed':False,'application_integration_tested':False,'application_or_customer_data_read':False,'tessdata_license_blob':LICENSE_BLOB}
               (out/'build-report.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
               zipped = out/'Amr-Mourad-OCR-Assets.zip'
               with zipfile.ZipFile(zipped,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
