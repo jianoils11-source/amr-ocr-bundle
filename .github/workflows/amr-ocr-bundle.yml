@@ -46,7 +46,7 @@ jobs:
               opener = build_opener(HTTPSHandler(context=ssl.create_default_context()),SafeRedirects())
               for attempt in range(3):
                   try:
-                      with opener.open(Request(url,headers={'User-Agent':'Amr-Mourad-OCR-Assets-Builder/1.1'}),timeout=90) as response:
+                      with opener.open(Request(url,headers={'User-Agent':'Amr-Mourad-OCR-Assets-Builder/1.2'}),timeout=90) as response:
                           data = response.read(maximum+1)
                       if not data or len(data)>maximum:
                           raise ValueError('Empty or oversized download')
@@ -101,7 +101,6 @@ jobs:
                               legal_found = True
                   if not legal_found and name in ('tesseract.js','tesseract.js-core'):
                       raise ValueError('Missing engine license')
-                  # Preserve actual metadata: npm data wrappers declare MIT; upstream traineddata is Apache-2.0.
                   write(legal_dir+'/package.json',member_bytes(tar,'package.json'))
                   write(legal_dir+'/package-metadata.json',json.dumps({'name':name,'version':version,'license':package['license'],'repository':package.get('repository'),'registry_metadata_url':url,'tarball_url':dist['tarball'],'integrity':integrity},ensure_ascii=False,indent=2).encode('utf-8'))
                   if name=='tesseract.js':
@@ -141,7 +140,8 @@ jobs:
               write('licenses/tessdata/LICENSE',legal)
               write('licenses/tessdata/ORIGIN.txt',('Arabic/English traineddata: https://github.com/naptha/tessdata/tree/gh-pages/4.0.0_best_int\nUpstream license: '+LICENSE_URL+'\nGit blob: '+LICENSE_BLOB+'\nNPM wrappers declare MIT; their metadata is preserved separately. No wrapper index.js is distributed.\n').encode())
               for js in VENDOR.rglob('*.js'):
-                  subprocess.run(['node','--check',str(js)],check=True)
+                  if js.is_file():
+                      subprocess.run(['node','--check',str(js)],check=True)
               subprocess.run(['node','-e',"const fs=require('fs'),p=require('path');const d=process.argv[1];for(const f of fs.readdirSync(d).filter(x=>x.endsWith('.wasm'))){if(!WebAssembly.validate(fs.readFileSync(p.join(d,f))))throw Error('Invalid WASM: '+f);console.log('Valid WASM:',f);}",str(VENDOR/'core')],check=True)
               write('.htaccess',b'<IfModule mod_mime.c>\nAddType application/wasm .wasm\nAddType application/javascript .js\nAddType application/gzip .gz\n</IfModule>\n')
               write('README.txt',b'Pinned public OCR assets. Tesseract.js 6.0.1/core 6.0.0; Arabic and English best_int.\nLicenses and origins are recorded under licenses/.\nIntegrity and WASM validation are NOT OCR accuracy tests.\n')
