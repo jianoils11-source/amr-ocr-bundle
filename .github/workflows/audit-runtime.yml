@@ -1,0 +1,35 @@
+name: Public database test runtime
+on:
+  push:
+    branches: [audit-runtime-20260922]
+    paths: [.github/workflows/audit-runtime.yml]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Obtain public signed distribution packages (no app checkout)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-artifact
+          docker run --rm -v "$PWD/runtime-artifact:/out" debian:trixie-slim sh -euxc '
+            apt-get update
+            apt-get -y --download-only --no-install-recommends install mariadb-server mariadb-client php8.4-cli php8.4-mysql php8.4-mbstring php8.4-gd php8.4-curl php8.4-xml php8.4-sqlite3 libapache2-mod-php8.4
+            cp /var/cache/apt/archives/*.deb /out/
+            apt-cache policy mariadb-server php8.4-cli > /out/package-policy.txt
+            cd /out
+            sha256sum *.deb > SHA256SUMS.txt
+            printf "Public signed Debian packages only. No customer/application files read or uploaded. No tests have run yet.\n" > README.txt
+          '
+      - name: Publish runtime dependencies
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: audit-runtime-${{ github.run_id }}
+          path: runtime-artifact/
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
