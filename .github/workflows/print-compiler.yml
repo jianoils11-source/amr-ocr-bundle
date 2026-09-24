@@ -1,0 +1,33 @@
+name: Public print compiler dependencies
+on:
+  push:
+    branches: [audit-runtime-20260922]
+    paths: [.github/workflows/print-compiler.yml]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download signed Debian build dependencies only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p compiler-artifact
+          docker run --rm -v "$PWD/compiler-artifact:/out" debian:trixie-slim sh -euxc '
+            apt-get update
+            apt-get -y --download-only --no-install-recommends install mono-mcs mono-runtime libmono-system-serviceprocess4.0-cil libmono-system-windows-forms4.0-cil libmono-system-web-extensions4.0-cil libmono-system-security4.0-cil libgdiplus
+            cp /var/cache/apt/archives/*.deb /out/
+            apt-cache policy mono-mcs mono-runtime > /out/package-policy.txt
+            cd /out && sha256sum *.deb > SHA256SUMS.txt
+            printf "Signed public distribution compiler packages only. No application code or customer files read, uploaded or compiled here.\n" > README.txt
+          '
+      - name: Publish compiler dependencies
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: print-compiler-${{ github.run_id }}
+          path: compiler-artifact/
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
